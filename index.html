@@ -183,13 +183,12 @@ const PosBadge = ({pos}) => { const c=POS_COLOR[pos]||POS_COLOR["기타"];
   return <span className="text-[11px] px-2 py-[2px] rounded-full text-white font-medium" style={{background:c}}>{pos||"기타"}</span>; };
 
 /* ============================== Gemini API (무료) ============================== */
-async function callGemini(settings, parts, jsonMode=true){
+async function callGemini(settings, parts, jsonMode=true, schema=null){
   if(!settings.geminiKey) throw new Error("NO_KEY");
   const model = settings.geminiModel || "gemini-2.5-flash";
-  const body = {
-    contents:[{ parts }],
-    generationConfig: Object.assign({ temperature:0.4, maxOutputTokens:8192 }, jsonMode?{ responseMimeType:"application/json" }:{})
-  };
+  const gc = { temperature:0.1, maxOutputTokens:16384 };
+  if(jsonMode){ gc.responseMimeType="application/json"; if(schema) gc.responseSchema=schema; }
+  const body = { contents:[{ parts }], generationConfig: gc };
   const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent?key="+encodeURIComponent(settings.geminiKey),{
     method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body)
   });
@@ -200,7 +199,51 @@ async function callGemini(settings, parts, jsonMode=true){
   if(!text) throw new Error("빈 응답 (요청 한도 초과나 키 오류일 수 있어요)");
   return text;
 }
-function parseJSON(text){ let s=text.replace(/```json/gi,"").replace(/```/g,"").trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1); return JSON.parse(s); }
+/* 구조화 출력 스키마 (AI가 형식을 못 틀리게 고정) */
+const STR = { type:"string" };
+const ANALYSIS_SCHEMA = {
+  type:"object",
+  properties:{
+    rawText: STR,
+    incompleteEnding: { type:"boolean" },
+    words: { type:"array", items:{ type:"object", properties:{
+      word:STR, display:STR, pos:STR,
+      meanings:{ type:"array", items:STR },
+      examples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR, type:STR } } }
+    } } },
+    sentences: { type:"array", items:{ type:"object", properties:{ en:STR, ko:STR } } },
+    phrases: { type:"array", items:{ type:"object", properties:{
+      phrase:STR, meaning:STR, explanation:STR,
+      nativeExamples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR } } }
+    } } }
+  }
+};
+const CORRECTION_SCHEMA = { type:"object", properties:{ ok:{ type:"boolean" }, corrected:STR, feedback:STR } };
+function parseJSON(text){
+  let s=text.replace(/```json/gi,"").replace(/```/g,"").trim();
+  const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1);
+  try{ return JSON.parse(s); }catch(e){}
+  // 흔한 오류 보정: 트레일링 콤마 제거 후 재시도
+  try{ return JSON.parse(s.replace(/,(\s*[}\]])/g,"$1")); }catch(e){}
+  return null;
+}
+// JSON 응답을 받되, 형식이 깨지면 자동으로 다시 시도
+async function callGeminiJSON(settings, parts, schema=null, retries=2){
+  let lastErr;
+  for(let i=0;i<=retries;i++){
+    try{
+      const txt = await callGemini(settings, parts, true, schema);
+      const parsed = parseJSON(txt);
+      if(parsed) return parsed;
+      lastErr = new Error("AI 응답 형식 오류 (자동 재시도했어요)");
+    }catch(e){
+      if(e.message==="NO_KEY") throw e;
+      lastErr = e;
+    }
+    if(i<retries) await new Promise(r=>setTimeout(r, 900));
+  }
+  throw lastErr || new Error("분석 실패");
+}
 function fileToBase64(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("read")); r.readAsDataURL(file); }); }
 
 function analysisPrompt(prevTail){
@@ -414,8 +457,8 @@ function AddPages({book, settings, onSaved, onBack, onNeedKey}){
       const parts=[];
       for(const f of files){ const b64=await fileToBase64(f); parts.push({ inline_data:{ mime_type:f.type||"image/jpeg", data:b64 } }); }
       parts.push({ text: analysisPrompt(prevTail) });
-      const txt=await callGemini(settings, parts, true);
-      setResult(parseJSON(txt));
+      const parsed=await callGeminiJSON(settings, parts, ANALYSIS_SCHEMA, 2);
+      setResult(parsed);
     }catch(e){ if(e.message==="NO_KEY") onNeedKey(); else setError("분석 실패: "+e.message); }
     finally{ setLoading(false); }
   }
@@ -526,8 +569,8 @@ function SentenceMaker({sentences,total,settings,onDone,onNeedKey}){
 학습자 답: "${answer}"
 아래 JSON만 출력(백틱·설명 금지):
 {"ok": true 또는 false, "corrected":"원어민이 자연스럽게 말할 회화체 교정 문장", "feedback":"좋은 점·고칠 점 한국어 1~2문장. 회화 자연스러움 기준."}`;
-      const txt=await callGemini(settings,[{text:prompt}],true);
-      setFeedback(parseJSON(txt));
+      const fb=await callGeminiJSON(settings,[{text:prompt}],CORRECTION_SCHEMA,2);
+      setFeedback(fb);
     }catch(e){ if(e.message==="NO_KEY") onNeedKey(); else setFeedback({ok:false,corrected:cur.en,feedback:"교정 요청 실패: "+e.message}); }
     finally{ setLoading(false); }
   }
