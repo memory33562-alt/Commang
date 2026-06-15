@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>원서 회화 노트 · English Reading Studio</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#f6f1e7; --paper2:#efe7d6; --ink:#2b2622; --ink2:#5c544a;
+    --accent:#8a5a2b; --accent2:#b07b3e; --line:#ddd2bd; --good:#3f7d50; --warn:#b3543a;
+  }
+  body{ background:var(--paper); color:var(--ink); font-family:'Noto Sans KR',sans-serif; }
+  .serif{ font-family:'Gowun Batang',serif; }
+  .card{ background:#fffdf8; border:1px solid var(--line); }
+  .btn{ transition:all .15s ease; }
+  .btn:active{ transform:translateY(1px); }
+  ::-webkit-scrollbar{ width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb{ background:#d8cbb2; border-radius:6px; }
+  input,textarea,select{ font-family:inherit; }
+  .fade{ animation:fade .25s ease; }
+  @keyframes fade{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:none;} }
+  .pulse{ animation:pulse 1s infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.4;} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* ============================== 로컬 설정/오프라인 저장 ============================== */
+const STORE_KEY = "engReaderApp_v2";
+const DEFAULT_SETTINGS = { geminiKey:"", geminiModel:"gemini-2.5-flash", googleKey:"", voice:"en-US-Neural2-F", firebaseConfig:"" };
+let memBooks = null, memSettings = null;
+
+function loadLocal(){
+  try{
+    const r = localStorage.getItem(STORE_KEY);
+    if(r){ const d = JSON.parse(r); return { books:d.books||[], settings:{...DEFAULT_SETTINGS, ...(d.settings||{})} }; }
+  }catch(e){}
+  return { books: memBooks||[], settings: memSettings||{...DEFAULT_SETTINGS} };
+}
+function saveLocal(books, settings){
+  memBooks = books; memSettings = settings;
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify({books, settings})); }catch(e){}
+}
+const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
+
+/* ============================== Google TTS (+브라우저 대체) ============================== */
+let gApi = { key:"", voice:"en-US-Neural2-F" };
+const ttsCache = new Map();
+let _voices = [];
+function refreshVoices(){ try{ _voices = window.speechSynthesis.getVoices()||[]; }catch(e){} }
+if(window.speechSynthesis){ refreshVoices(); window.speechSynthesis.onvoiceschanged = refreshVoices; }
+
+function browserSpeak(text, rate=0.95){
+  try{
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text); u.lang="en-US"; u.rate=rate;
+    if(!_voices.length) refreshVoices();
+    const v = _voices.find(x=>/en[-_]US/i.test(x.lang) && /Google|Samantha|Natural|English/i.test(x.name))
+          || _voices.find(x=>/en[-_]US/i.test(x.lang)) || _voices.find(x=>/^en/i.test(x.lang));
+    if(v) u.voice=v;
+    window.speechSynthesis.speak(u);
+  }catch(e){}
+}
+async function speak(text, rate=1){
+  if(!text) return;
+  if(gApi.key && text.length < 4800){
+    try{
+      const ck = gApi.voice+"|"+rate+"|"+text;
+      let b64 = ttsCache.get(ck);
+      if(!b64){
+        const res = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize?key="+encodeURIComponent(gApi.key),{
+          method:"POST", headers:{"content-type":"application/json"},
+          body: JSON.stringify({
+            input:{ text },
+            voice:{ languageCode:"en-US", name: gApi.voice },
+            audioConfig:{ audioEncoding:"MP3", speakingRate: rate }
+          })
+        });
+        if(!res.ok) throw new Error("tts "+res.status);
+        const d = await res.json(); b64 = d.audioContent;
+        if(ttsCache.size>120) ttsCache.clear();
+        ttsCache.set(ck, b64);
+      }
+      const audio = new Audio("data:audio/mp3;base64,"+b64);
+      await audio.play();
+      return;
+    }catch(e){ /* 아래 브라우저 발음으로 대체 */ }
+  }
+  browserSpeak(text, 0.95*rate);
+}
+const SpeakBtn = ({text, label="🔊", cls=""}) => (
+  <button className={"btn text-[var(--accent)] hover:text-[var(--accent2)] "+cls}
+    onClick={(e)=>{e.stopPropagation(); speak(text);}} title="미국 발음 듣기">{label}</button>
+);
+
+/* ============================== Google STT (받아쓰기) ============================== */
+function blobToB64(blob){
+  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("read")); r.readAsDataURL(blob); });
+}
+function pickMime(){
+  const opts=["audio/webm;codecs=opus","audio/ogg;codecs=opus","audio/webm"];
+  for(const m of opts){ if(window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m; }
+  return "";
+}
+function useGoogleSTT(){
+  const [recording,setRecording]=useState(false);
+  const mediaRef=useRef(null), chunksRef=useRef([]), streamRef=useRef(null);
+  async function start(onResult, onError){
+    const mime = pickMime();
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      streamRef.current = stream;
+      const mr = new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+      mediaRef.current = mr; chunksRef.current=[];
+      mr.ondataavailable = e=>{ if(e.data.size) chunksRef.current.push(e.data); };
+      mr.onstop = async ()=>{
+        try{
+          const blob = new Blob(chunksRef.current, {type: mime||"audio/webm"});
+          const b64 = await blobToB64(blob);
+          const enc = (mime.includes("ogg")) ? "OGG_OPUS" : "WEBM_OPUS";
+          const res = await fetch("https://speech.googleapis.com/v1/speech:recognize?key="+encodeURIComponent(gApi.key),{
+            method:"POST", headers:{"content-type":"application/json"},
+            body: JSON.stringify({
+              config:{ encoding: enc, languageCode:"en-US", enableAutomaticPunctuation:true, model:"latest_short" },
+              audio:{ content: b64 }
+            })
+          });
+          if(!res.ok) throw new Error("stt "+res.status);
+          const d = await res.json();
+          const t = (((d.results||[])[0]||{}).alternatives||[])[0]?.transcript || "";
+          onResult(t);
+        }catch(e){ onError && onError(e); }
+        finally{ try{ streamRef.current.getTracks().forEach(t=>t.stop()); }catch(_){} setRecording(false); }
+      };
+      mr.start(); setRecording(true);
+    }catch(e){ onError && onError(e); setRecording(false); }
+  }
+  function stop(){ try{ mediaRef.current && mediaRef.current.stop(); }catch(e){} }
+  return { recording, start, stop };
+}
+function useBrowserSTT(){
+  const recRef=useRef(null); const [listening,setListening]=useState(false);
+  const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  function start(onResult){
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition; if(!SR) return;
+    const rec=new SR(); recRef.current=rec; rec.lang="en-US"; rec.interimResults=false; rec.maxAlternatives=1;
+    rec.onresult=ev=>onResult(ev.results[0][0].transcript);
+    rec.onend=()=>setListening(false); rec.onerror=()=>setListening(false);
+    setListening(true); rec.start();
+  }
+  function stop(){ try{ recRef.current && recRef.current.stop(); }catch(e){} setListening(false); }
+  return { listening, start, stop, supported };
+}
+/* 통합: Google 키 있고 녹음 가능하면 Google STT, 아니면 브라우저 */
+function useDictation(){
+  const g = useGoogleSTT();
+  const b = useBrowserSTT();
+  const canGoogle = !!gApi.key && !!pickMime() && !!navigator.mediaDevices;
+  if(canGoogle){
+    return { active:g.recording, supported:true, mode:"google",
+      start:(cb)=> g.start(cb, e=> alert("음성 인식 오류: "+(e.message||e))), stop:g.stop };
+  }
+  return { active:b.listening, supported:b.supported, mode:"browser",
+    start:(cb)=> b.start(cb), stop:b.stop };
+}
+
+/* ============================== 품사 배지 ============================== */
+const POS_COLOR = { "명사":"#3f6f8a","동사":"#a6552f","형용사":"#5b7a3a","부사":"#7a5aa6","전치사":"#8a6a3f","접속사":"#a63f6f","대명사":"#3f8a7a","감탄사":"#8a3f3f","기타":"#6b6258" };
+const PosBadge = ({pos}) => { const c=POS_COLOR[pos]||POS_COLOR["기타"];
+  return <span className="text-[11px] px-2 py-[2px] rounded-full text-white font-medium" style={{background:c}}>{pos||"기타"}</span>; };
+
+/* ============================== Gemini API (무료) ============================== */
+async function callGemini(settings, parts, jsonMode=true){
+  if(!settings.geminiKey) throw new Error("NO_KEY");
+  const model = settings.geminiModel || "gemini-2.5-flash";
+  const body = {
+    contents:[{ parts }],
+    generationConfig: Object.assign({ temperature:0.4, maxOutputTokens:8192 }, jsonMode?{ responseMimeType:"application/json" }:{})
+  };
+  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent?key="+encodeURIComponent(settings.geminiKey),{
+    method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body)
+  });
+  if(!res.ok){ const t=await res.text().catch(()=> ""); throw new Error("Gemini "+res.status+": "+t.slice(0,200)); }
+  const data = await res.json();
+  const cand = (data.candidates||[])[0];
+  const text = (((cand||{}).content||{}).parts||[]).map(p=>p.text||"").join("");
+  if(!text) throw new Error("빈 응답 (요청 한도 초과나 키 오류일 수 있어요)");
+  return text;
+}
+function parseJSON(text){ let s=text.replace(/```json/gi,"").replace(/```/g,"").trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1); return JSON.parse(s); }
+function fileToBase64(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("read")); r.readAsDataURL(file); }); }
+
+function analysisPrompt(prevTail){
+  return `당신은 영어 회화 학습 튜터입니다. 학습자는 CEFR A2 수준이며 목표는 회화(스피킹) 향상입니다 (문법 시험 X, 토익/수능 X).
+업로드된 영어 원서 페이지 이미지를 읽고, 회화 학습에 맞게 정리하세요. 반드시 아래 JSON만 출력하세요. 설명·인사·마크다운 백틱 금지, 순수 JSON만.
+${prevTail ? `\n[이전 페이지 마지막 부분 — 문장이 이어질 수 있음]: "${prevTail}"\n이미지의 첫 문장이 위 내용에서 이어지면 합쳐서 한 문장으로 정리하세요.\n` : ""}
+JSON 스키마:
+{
+ "rawText":"이미지에서 읽은 영어 원문 전체(문장 순서대로)",
+ "incompleteEnding": true 또는 false,
+ "words":[ {"word":"원형","display":"본문 형태","pos":"명사/동사/형용사/부사/전치사/접속사/대명사/감탄사/기타","meanings":["자주 쓰는 뜻 모두(한국어)"],"examples":[{"en":"평서문","ko":"번역","type":"평서문"},{"en":"의문문","ko":"번역","type":"의문문"}]} ],
+ "sentences":[ {"en":"영어 원본 문장","ko":"한국어 번역"} ],
+ "phrases":[ {"phrase":"구문 패턴(예: as 원급 as, used to)","meaning":"한국어 의미","explanation":"회화 활용 설명(한국어)","nativeExamples":[{"en":"원어민 표현","ko":"한국어"}]} ]
+}
+규칙:
+- words: A2에게 유용하거나 모를 만한 단어 위주(쉬운 기능어 제외). 자주 쓰는 뜻은 빠짐없이.
+- examples: 평서문/의문문 번갈아, 회화에서 바로 쓸 자연스러운 문장.
+- sentences: 원문을 한 문장씩 영어→한국어, 자연스럽게.
+- phrases: 문법 시험용 X, 회화에서 자주 쓰거나 이해 어려운 패턴 위주, 원어민 실제 표현 포함.`;
+}
+
+/* ============================== 공통 UI ============================== */
+const Section = ({title, emoji, children, sub}) => (
+  <div className="mb-6 fade">
+    <div className="flex items-baseline gap-2 mb-3 border-b border-[var(--line)] pb-2">
+      <h3 className="serif text-lg font-bold">{emoji} {title}</h3>
+      {sub && <span className="text-xs text-[var(--ink2)]">{sub}</span>}
+    </div>
+    {children}
+  </div>
+);
+const Btn = ({children, onClick, kind="primary", className="", ...rest}) => {
+  const styles={ primary:"bg-[var(--accent)] text-white hover:bg-[var(--accent2)]", ghost:"bg-transparent text-[var(--ink)] border border-[var(--line)] hover:bg-[var(--paper2)]", soft:"bg-[var(--paper2)] text-[var(--ink)] hover:bg-[#e4d8c0]", danger:"bg-[var(--warn)] text-white hover:opacity-90" };
+  return <button onClick={onClick} className={`btn rounded-lg px-4 py-2 text-sm font-medium ${styles[kind]} ${className}`} {...rest}>{children}</button>;
+};
+
+/* ============================== 설정 ============================== */
+function Settings({settings, onSave, onClose}){
+  const [s, setS] = useState(settings);
+  const set = (k,v)=> setS(p=>({...p,[k]:v}));
+  const voices = ["en-US-Neural2-F","en-US-Neural2-D","en-US-Neural2-J","en-US-Neural2-C","en-US-Wavenet-F","en-US-Studio-O"];
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>
+      <div className="card rounded-2xl p-6 w-full max-w-lg my-8" onClick={e=>e.stopPropagation()}>
+        <h2 className="serif text-xl font-bold mb-1">⚙️ 설정</h2>
+        <p className="text-xs text-[var(--ink2)] mb-4">모든 키는 이 기기 브라우저에만 저장됩니다. 깃허브 저장소에는 올라가지 않습니다.</p>
+
+        <p className="serif font-bold text-sm mt-2 mb-2">① 사진 분석·문장 교정 (Google Gemini · 무료)</p>
+        <input type="password" value={s.geminiKey} onChange={e=>set("geminiKey",e.target.value)} placeholder="AIza... (Google AI Studio 키)"
+          className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <input value={s.geminiModel} onChange={e=>set("geminiModel",e.target.value)} placeholder="gemini-2.5-flash"
+          className="w-full mb-1 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <p className="text-[11px] text-[var(--ink2)] mb-4">aistudio.google.com → ‘Get API key’에서 무료 발급 (카드 불필요). 하루 1,500건까지 무료.</p>
+
+        <p className="serif font-bold text-sm mt-2 mb-2">② 미국 발음 + 받아쓰기 (선택)</p>
+        <p className="text-[11px] text-[var(--ink2)] mb-2">비워두면 브라우저 무료 발음·음성인식이 자동으로 쓰입니다(카드 불필요). 더 좋은 발음을 원할 때만 Google Cloud TTS/STT 키를 넣으세요.</p>
+        <input type="password" value={s.googleKey} onChange={e=>set("googleKey",e.target.value)} placeholder="AIza... (선택: Google Cloud TTS·STT 키)"
+          className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <label className="text-xs text-[var(--ink2)]">발음 음성</label>
+        <select value={s.voice} onChange={e=>set("voice",e.target.value)}
+          className="w-full mt-1 mb-4 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm">
+          {voices.map(v=><option key={v} value={v}>{v}</option>)}
+        </select>
+
+        <p className="serif font-bold text-sm mt-2 mb-2">③ 기기 간 저장·동기화 (Firebase 설정)</p>
+        <textarea value={s.firebaseConfig} onChange={e=>set("firebaseConfig",e.target.value)} rows={6}
+          placeholder={'{\n  "apiKey": "...",\n  "authDomain": "...",\n  "projectId": "...",\n  "storageBucket": "...",\n  "messagingSenderId": "...",\n  "appId": "..."\n}'}
+          className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-xs font-mono" />
+        <p className="text-[11px] text-[var(--ink2)] mb-4 leading-relaxed">
+          Firebase 콘솔의 웹 앱 설정값을 붙여넣으세요. 저장 후 상단 ‘Google 로그인’을 누르면 다른 기기에서도 같은 계정으로 동기화됩니다.
+        </p>
+
+        <div className="flex gap-2 justify-end">
+          <Btn kind="ghost" onClick={onClose}>닫기</Btn>
+          <Btn onClick={()=>onSave(s)}>저장</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== 홈 ============================== */
+function Home({books, onOpen, onCreate, onDelete}){
+  const [title,setTitle]=useState("");
+  return (
+    <div className="fade">
+      <Section title="새 원서 추가" emoji="📖" sub="Step 1 · 원서 제목별로 데이터가 저장됩니다">
+        <div className="flex gap-2">
+          <input value={title} onChange={e=>setTitle(e.target.value)}
+            onKeyDown={e=>{ if(e.key==="Enter"&&title.trim()){ onCreate(title.trim()); setTitle(""); } }}
+            placeholder="예: Charlie and the Chocolate Factory"
+            className="flex-1 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+          <Btn onClick={()=>{ if(title.trim()){ onCreate(title.trim()); setTitle(""); } }}>추가</Btn>
+        </div>
+      </Section>
+      <Section title="내 원서" emoji="📚">
+        {books.length===0 && <p className="text-sm text-[var(--ink2)]">아직 원서가 없습니다. 위에서 제목을 추가하세요.</p>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          {books.map(b=>{
+            const wc=b.entries.reduce((s,e)=>s+(e.words?.length||0),0);
+            const pc=b.entries.reduce((s,e)=>s+(e.phrases?.length||0),0);
+            return (
+              <div key={b.id} className="card rounded-xl p-4 hover:shadow-md transition cursor-pointer group" onClick={()=>onOpen(b.id)}>
+                <div className="flex justify-between items-start gap-2">
+                  <h4 className="serif font-bold leading-snug">{b.title}</h4>
+                  <button className="opacity-0 group-hover:opacity-100 text-[var(--warn)] text-xs"
+                    onClick={e=>{e.stopPropagation(); if(confirm("이 원서를 삭제할까요?")) onDelete(b.id);}}>삭제</button>
+                </div>
+                <p className="text-xs text-[var(--ink2)] mt-2">정리 {b.entries.length}회 · 단어 {wc} · 구문 {pc}</p>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ============================== 원서 화면 ============================== */
+function BookView({book, onBack, onAdd, onReview, onDeleteEntry}){
+  return (
+    <div className="fade">
+      <div className="flex items-center justify-between mb-4">
+        <button className="text-sm text-[var(--ink2)] hover:text-[var(--ink)]" onClick={onBack}>← 원서 목록</button>
+        <div className="flex gap-2">
+          <Btn kind="soft" onClick={onReview}>🔁 Review</Btn>
+          <Btn onClick={onAdd}>＋ 페이지 추가</Btn>
+        </div>
+      </div>
+      <h2 className="serif text-2xl font-bold mb-1">{book.title}</h2>
+      <p className="text-xs text-[var(--ink2)] mb-6">Step 2~3 · 사진을 올려 단어·번역·구문을 정리하세요</p>
+      {book.entries.length===0 && <p className="text-sm text-[var(--ink2)]">아직 정리한 페이지가 없습니다.</p>}
+      <div className="space-y-3">
+        {book.entries.map((e,i)=>(
+          <details key={e.id} className="card rounded-xl overflow-hidden">
+            <summary className="cursor-pointer px-4 py-3 flex items-center justify-between select-none">
+              <span className="font-medium text-sm">#{i+1} · {e.pageRange||"페이지"} <span className="text-[var(--ink2)]">— 단어 {e.words?.length||0} · 문장 {e.sentences?.length||0} · 구문 {e.phrases?.length||0}</span>
+                {e.incompleteEnding && <span className="ml-2 text-[11px] text-[var(--warn)]">↪ 다음 페이지로 이어짐</span>}</span>
+              <button className="text-[var(--warn)] text-xs" onClick={ev=>{ev.preventDefault(); if(confirm("이 정리를 삭제할까요?")) onDeleteEntry(e.id);}}>삭제</button>
+            </summary>
+            <div className="px-4 pb-4 border-t border-[var(--line)] pt-3"><EntryDetail entry={e} /></div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+function EntryDetail({entry}){
+  return (
+    <div>
+      <Section title="단어 정리" emoji="①" sub="뜻 · 품사 · 예문(평서문/의문문)">
+        <div className="space-y-3">
+          {(entry.words||[]).map((w,i)=>(
+            <div key={i} className="border-b border-[var(--line)] pb-3 last:border-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="serif text-lg font-bold">{w.display||w.word}</span>
+                <SpeakBtn text={w.word} /><PosBadge pos={w.pos} />
+                <span className="text-sm text-[var(--ink2)]">{(w.meanings||[]).join(", ")}</span>
+              </div>
+              <div className="mt-2 pl-3 border-l-2 border-[var(--line)] space-y-1">
+                {(w.examples||[]).map((ex,j)=>(
+                  <div key={j} className="text-sm">
+                    <span className="text-[11px] text-[var(--accent)] mr-1">[{ex.type}]</span>
+                    <span>{ex.en}</span> <SpeakBtn text={ex.en} cls="text-xs" /><span className="text-[var(--ink2)]"> — {ex.ko}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+      <Section title="문장 번역" emoji="③" sub="영어 원본 → 한국어">
+        <div className="space-y-2">
+          {(entry.sentences||[]).map((s,i)=>(
+            <div key={i} className="text-sm">
+              <div className="flex items-start gap-1"><SpeakBtn text={s.en} cls="text-xs mt-[2px]" /><span className="serif">{s.en}</span></div>
+              <div className="text-[var(--ink2)] pl-5">↳ {s.ko}</div>
+            </div>
+          ))}
+        </div>
+      </Section>
+      <Section title="회화 구문" emoji="④" sub="자주 쓰거나 이해가 어려운 패턴">
+        <div className="space-y-3">
+          {(entry.phrases||[]).map((p,i)=>(
+            <div key={i} className="bg-[var(--paper2)] rounded-lg p-3">
+              <div className="font-bold text-sm">{p.phrase} <span className="font-normal text-[var(--ink2)]">— {p.meaning}</span></div>
+              {p.explanation && <div className="text-xs text-[var(--ink2)] mt-1">{p.explanation}</div>}
+              <div className="mt-2 space-y-1">
+                {(p.nativeExamples||[]).map((ex,j)=>(
+                  <div key={j} className="text-sm">• {ex.en} <SpeakBtn text={ex.en} cls="text-xs" /> <span className="text-[var(--ink2)]">— {ex.ko}</span></div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ============================== 페이지 추가 ============================== */
+function AddPages({book, settings, onSaved, onBack, onNeedKey}){
+  const [files,setFiles]=useState([]); const [pageRange,setPageRange]=useState("");
+  const [loading,setLoading]=useState(false); const [error,setError]=useState(""); const [result,setResult]=useState(null);
+  const prevTail = useMemo(()=>{ const last=book.entries[book.entries.length-1]; return (last&&last.incompleteEnding&&last.rawText)? last.rawText.slice(-220):""; }, [book]);
+  async function analyze(){
+    if(!settings.geminiKey){ onNeedKey(); return; }
+    if(!files.length){ setError("사진을 1~3장 선택하세요."); return; }
+    setError(""); setLoading(true); setResult(null);
+    try{
+      const parts=[];
+      for(const f of files){ const b64=await fileToBase64(f); parts.push({ inline_data:{ mime_type:f.type||"image/jpeg", data:b64 } }); }
+      parts.push({ text: analysisPrompt(prevTail) });
+      const txt=await callGemini(settings, parts, true);
+      setResult(parseJSON(txt));
+    }catch(e){ if(e.message==="NO_KEY") onNeedKey(); else setError("분석 실패: "+e.message); }
+    finally{ setLoading(false); }
+  }
+  function save(){
+    onSaved({ id:uid(), pageRange:pageRange.trim()||("p."+(book.entries.length*3+1)), createdAt:Date.now(),
+      rawText:result.rawText||"", incompleteEnding:!!result.incompleteEnding, words:result.words||[], sentences:result.sentences||[], phrases:result.phrases||[] });
+  }
+  return (
+    <div className="fade">
+      <button className="text-sm text-[var(--ink2)] hover:text-[var(--ink)] mb-4" onClick={onBack}>← {book.title}</button>
+      <h2 className="serif text-2xl font-bold mb-1">페이지 추가</h2>
+      <p className="text-xs text-[var(--ink2)] mb-5">Step 2 · 1~3페이지 단위로 사진을 올리세요</p>
+      {prevTail && <div className="card rounded-lg p-3 mb-4 text-xs text-[var(--ink2)]">↪ 이전 페이지가 문장 중간에서 끊겼습니다. 이어지는 내용으로 함께 정리됩니다.</div>}
+      <div className="card rounded-xl p-4 mb-4">
+        <label className="text-sm font-medium">페이지 표시 (선택)</label>
+        <input value={pageRange} onChange={e=>setPageRange(e.target.value)} placeholder="예: p.12–14"
+          className="w-full mt-1 mb-3 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <label className="text-sm font-medium">사진 (1~3장)</label>
+        <input type="file" accept="image/*" multiple onChange={e=>setFiles(Array.from(e.target.files).slice(0,3))} className="block w-full mt-1 text-sm" />
+        {files.length>0 && <p className="text-xs text-[var(--ink2)] mt-1">{files.length}장 선택됨</p>}
+        <div className="mt-3"><Btn onClick={analyze} disabled={loading}>{loading?"분석 중…":"🔍 분석"}</Btn></div>
+        {error && <p className="text-sm text-[var(--warn)] mt-2">{error}</p>}
+        {loading && <p className="text-xs text-[var(--ink2)] mt-2">사진을 읽고 단어·번역·구문을 정리하는 중입니다…</p>}
+      </div>
+      {result && (
+        <div className="card rounded-xl p-4">
+          <div className="flex justify-between items-center mb-3"><h3 className="serif font-bold">정리 결과 미리보기</h3><Btn onClick={save}>💾 저장</Btn></div>
+          <EntryDetail entry={result} />
+          <div className="text-right"><Btn onClick={save}>💾 저장</Btn></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================== Review 공통 ============================== */
+function buildPool(books, scope, bookId){
+  const src = scope==="all" ? books : books.filter(b=>b.id===bookId);
+  const words=[],phrases=[],sentences=[]; const sw=new Set(),sp=new Set();
+  src.forEach(b=>b.entries.forEach(e=>{
+    (e.words||[]).forEach(w=>{ const k=(w.word||"").toLowerCase(); if(k&&!sw.has(k)){ sw.add(k); words.push(w); } });
+    (e.phrases||[]).forEach(p=>{ const k=(p.phrase||"").toLowerCase(); if(k&&!sp.has(k)){ sp.add(k); phrases.push(p); } });
+    (e.sentences||[]).forEach(s=>{ if(s.en) sentences.push(s); });
+  }));
+  return {words,phrases,sentences};
+}
+const shuffle = a=>{ const r=[...a]; for(let i=r.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; } return r; };
+
+function FlashRunner({items,total,renderFront,renderBack,frontSpeak,onDone,label}){
+  const deck=useMemo(()=>shuffle(items).slice(0,total),[items,total]);
+  const [i,setI]=useState(0); const [show,setShow]=useState(false);
+  if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 항목이 없습니다.</p>;
+  if(i>=deck.length) return <div className="text-center py-8 fade"><p className="serif text-xl font-bold mb-3">완료! 🎉 {deck.length}개 복습</p><Btn onClick={onDone}>복습 메뉴로</Btn></div>;
+  const cur=deck[i];
+  return (
+    <div className="fade">
+      <div className="flex justify-between text-xs text-[var(--ink2)] mb-2"><span>{label}</span><span>{i+1} / {deck.length}</span></div>
+      <div className="h-2 bg-[var(--paper2)] rounded-full mb-4 overflow-hidden"><div className="h-full bg-[var(--accent)]" style={{width:`${(i/deck.length)*100}%`}} /></div>
+      <div className="card rounded-2xl p-6 min-h-[180px] flex flex-col items-center justify-center text-center">
+        <div className="mb-4">{renderFront(cur)}</div>
+        {frontSpeak && <SpeakBtn text={frontSpeak(cur)} label="🔊 발음 듣기" cls="text-sm mb-2" />}
+        {show ? <div className="mt-3 pt-3 border-t border-[var(--line)] w-full fade">{renderBack(cur)}</div>
+              : <Btn kind="soft" className="mt-2" onClick={()=>setShow(true)}>정답 확인</Btn>}
+      </div>
+      {show && <div className="flex gap-2 justify-center mt-4"><Btn kind="ghost" onClick={()=>{setShow(false); setI(i+1);}}>다시 볼래요</Btn><Btn onClick={()=>{setShow(false); setI(i+1);}}>다음 →</Btn></div>}
+    </div>
+  );
+}
+function ListenChoice({words,total,onDone}){
+  const deck=useMemo(()=>shuffle(words.filter(w=>(w.meanings||[]).length)).slice(0,total),[words,total]);
+  const [i,setI]=useState(0); const [picked,setPicked]=useState(null); const [score,setScore]=useState(0);
+  const options=useMemo(()=>{ if(i>=deck.length) return []; const c=deck[i]; const o=shuffle(words.filter(w=>w!==c&&(w.meanings||[]).length)).slice(0,3); return shuffle([c,...o]); },[i,deck,words]);
+  useEffect(()=>{ if(deck[i]) speak(deck[i].word); },[i]);
+  if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 단어가 없습니다.</p>;
+  if(i>=deck.length) return <div className="text-center py-8 fade"><p className="serif text-xl font-bold mb-2">완료! 🎉</p><p className="mb-3">{deck.length}개 중 {score}개 정답</p><Btn onClick={onDone}>복습 메뉴로</Btn></div>;
+  const cur=deck[i];
+  return (
+    <div className="fade">
+      <div className="flex justify-between text-xs text-[var(--ink2)] mb-2"><span>듣고 뜻 맞추기</span><span>{i+1} / {deck.length}</span></div>
+      <div className="card rounded-2xl p-6 text-center">
+        <SpeakBtn text={cur.word} label="🔊 다시 듣기" cls="text-base" />
+        <div className="grid gap-2 mt-4">
+          {options.map((o,j)=>{ const isC=o===cur,isP=picked===o; let cls="border-[var(--line)] hover:bg-[var(--paper2)]";
+            if(picked){ if(isC) cls="border-[var(--good)] bg-[#e8f1ea]"; else if(isP) cls="border-[var(--warn)] bg-[#f5e6e1]"; }
+            return <button key={j} disabled={!!picked} onClick={()=>{ setPicked(o); if(o===cur) setScore(s=>s+1); }} className={"btn text-sm text-left px-4 py-2 rounded-lg border "+cls}>{(o.meanings||[]).join(", ")}</button>;
+          })}
+        </div>
+        {picked && <div className="mt-4 fade"><p className="serif font-bold">{cur.word} <PosBadge pos={cur.pos} /></p><Btn className="mt-3" onClick={()=>{ setPicked(null); setI(i+1); }}>다음 →</Btn></div>}
+      </div>
+    </div>
+  );
+}
+function SentenceMaker({sentences,total,settings,onDone,onNeedKey}){
+  const deck=useMemo(()=>shuffle(sentences.filter(s=>s.en&&s.en.split(" ").length<=18)).slice(0,total),[sentences,total]);
+  const [i,setI]=useState(0); const [answer,setAnswer]=useState(""); const [feedback,setFeedback]=useState(null); const [loading,setLoading]=useState(false);
+  const dict=useDictation();
+  if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 문장이 없습니다.</p>;
+  if(i>=deck.length) return <div className="text-center py-8 fade"><p className="serif text-xl font-bold mb-3">완료! 🎉 {deck.length}문장 연습</p><Btn onClick={onDone}>복습 메뉴로</Btn></div>;
+  const cur=deck[i];
+  async function check(){
+    if(!settings.geminiKey){ onNeedKey(); return; }
+    if(!answer.trim()) return;
+    setLoading(true); setFeedback(null);
+    try{
+      const prompt=`학습자는 영어 회화를 연습 중입니다(CEFR A2 → 목표 IH/AL). 한국어 뜻을 보고 영어로 말한 답을 평가하세요.
+한국어 의미: "${cur.ko}"
+참고 원문(원서 문장): "${cur.en}"
+학습자 답: "${answer}"
+아래 JSON만 출력(백틱·설명 금지):
+{"ok": true 또는 false, "corrected":"원어민이 자연스럽게 말할 회화체 교정 문장", "feedback":"좋은 점·고칠 점 한국어 1~2문장. 회화 자연스러움 기준."}`;
+      const txt=await callGemini(settings,[{text:prompt}],true);
+      setFeedback(parseJSON(txt));
+    }catch(e){ if(e.message==="NO_KEY") onNeedKey(); else setFeedback({ok:false,corrected:cur.en,feedback:"교정 요청 실패: "+e.message}); }
+    finally{ setLoading(false); }
+  }
+  function next(){ setAnswer(""); setFeedback(null); setI(i+1); }
+  return (
+    <div className="fade">
+      <div className="flex justify-between text-xs text-[var(--ink2)] mb-2"><span>한국어 → 영어로 말하기</span><span>{i+1} / {deck.length}</span></div>
+      <div className="card rounded-2xl p-6">
+        <p className="text-xs text-[var(--ink2)] mb-1">이 뜻을 영어로 말해보세요</p>
+        <p className="serif text-lg font-bold mb-4">{cur.ko}</p>
+        <textarea value={answer} onChange={e=>setAnswer(e.target.value)} rows={2} placeholder="영어로 입력하거나 🎤 버튼으로 말하세요"
+          className="w-full px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <div className="flex gap-2 mt-2 flex-wrap items-center">
+          {dict.supported && <Btn kind={dict.active?"danger":"ghost"} onClick={()=> dict.active ? dict.stop() : dict.start(t=>setAnswer(t))}>{dict.active? "● 듣는 중… 정지" : "🎤 말하기"}</Btn>}
+          <Btn onClick={check} disabled={loading}>{loading?"확인 중…":"확인"}</Btn>
+          {dict.active && <span className="text-xs text-[var(--warn)] pulse">녹음 중</span>}
+          <span className="text-[11px] text-[var(--ink2)]">{dict.mode==="google"?"Google 음성인식":"브라우저 음성인식"}</span>
+        </div>
+        {!dict.supported && <p className="text-[11px] text-[var(--ink2)] mt-1">※ 음성 입력을 못 쓰는 환경입니다. 타이핑으로 진행하세요.</p>}
+        {feedback && (
+          <div className="mt-4 pt-4 border-t border-[var(--line)] fade">
+            <p className={"text-sm font-bold "+(feedback.ok?"text-[var(--good)]":"text-[var(--warn)]")}>{feedback.ok?"👍 잘했어요":"✍️ 이렇게 고쳐보세요"}</p>
+            <div className="mt-2 text-sm"><span className="text-[var(--ink2)]">교정: </span><span className="serif">{feedback.corrected}</span><SpeakBtn text={feedback.corrected} cls="ml-1" /></div>
+            <p className="text-xs text-[var(--ink2)] mt-2">{feedback.feedback}</p>
+            <p className="text-xs text-[var(--ink2)] mt-2">원서 원문: <span className="serif">{cur.en}</span> <SpeakBtn text={cur.en} cls="text-xs"/></p>
+            <Btn className="mt-3" onClick={next}>다음 →</Btn>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================== Review 메인 ============================== */
+function Review({books,currentBookId,settings,onBack,onNeedKey}){
+  const [scope,setScope]=useState(currentBookId?"book":"all");
+  const [type,setType]=useState(null); const [mode,setMode]=useState(null);
+  const pool=useMemo(()=>buildPool(books,scope,currentBookId),[books,scope,currentBookId]);
+  const curBook=books.find(b=>b.id===currentBookId);
+  function reset(){ setType(null); setMode(null); }
+  if(type==="words"&&mode){
+    return (
+      <ReviewShell title="단어 복습 · 30개" onBack={reset}>
+        {mode==="ko2en" && <FlashRunner items={pool.words} total={30} label="한글 → 영어"
+          renderFront={w=><div><p className="text-xs text-[var(--ink2)] mb-1">이 뜻의 영어 단어는?</p><p className="serif text-2xl font-bold">{(w.meanings||[]).join(", ")}</p><p className="text-xs mt-1"><PosBadge pos={w.pos}/></p></div>}
+          renderBack={w=><div><p className="serif text-2xl font-bold">{w.word}</p><SpeakBtn text={w.word} label="🔊 발음 듣기" cls="text-sm mt-1"/></div>} />}
+        {mode==="en2ko" && <FlashRunner items={pool.words} total={30} label="영어 → 한글" frontSpeak={w=>w.word}
+          renderFront={w=><div><p className="serif text-2xl font-bold">{w.word}</p><p className="text-xs mt-1"><PosBadge pos={w.pos}/></p></div>}
+          renderBack={w=><p className="text-lg">{(w.meanings||[]).join(", ")}</p>} />}
+        {mode==="listen" && <ListenChoice words={pool.words} total={30} onDone={reset} />}
+      </ReviewShell>
+    );
+  }
+  if(type==="phrases"&&mode){
+    const flat=[]; pool.phrases.forEach(p=>(p.nativeExamples||[]).forEach(ex=>flat.push({...ex,phrase:p.phrase})));
+    return (
+      <ReviewShell title="구문 복습 · 20개" onBack={reset}>
+        {mode==="ko2en" && <FlashRunner items={pool.phrases} total={20} label="한글 → 영어"
+          renderFront={p=><div><p className="text-xs text-[var(--ink2)] mb-1">이 뜻의 영어 구문은?</p><p className="serif text-xl font-bold">{p.meaning}</p></div>}
+          renderBack={p=><div><p className="serif text-xl font-bold">{p.phrase}</p>{(p.nativeExamples||[]).map((ex,k)=><p key={k} className="text-sm mt-1">{ex.en} <SpeakBtn text={ex.en} cls="text-xs"/> <span className="text-[var(--ink2)]">— {ex.ko}</span></p>)}</div>} />}
+        {mode==="en2ko" && <FlashRunner items={pool.phrases} total={20} label="영어 → 한글" frontSpeak={p=>p.phrase}
+          renderFront={p=><p className="serif text-xl font-bold">{p.phrase}</p>}
+          renderBack={p=><div><p className="text-base">{p.meaning}</p>{p.explanation&&<p className="text-xs text-[var(--ink2)] mt-1">{p.explanation}</p>}</div>} />}
+        {mode==="apply" && <FlashRunner items={flat} total={20} label="원어민 표현 ↔ 뜻" frontSpeak={x=>x.en}
+          renderFront={x=><div><p className="text-xs text-[var(--ink2)] mb-1">[{x.phrase}] 이 표현의 뜻은?</p><p className="serif text-xl font-bold">{x.en}</p></div>}
+          renderBack={x=><p className="text-lg">{x.ko}</p>} />}
+      </ReviewShell>
+    );
+  }
+  if(type==="sentences"){
+    return <ReviewShell title="문장 만들기 · 15개" onBack={reset}><SentenceMaker sentences={pool.sentences} total={15} settings={settings} onDone={reset} onNeedKey={onNeedKey} /></ReviewShell>;
+  }
+  return (
+    <div className="fade">
+      <button className="text-sm text-[var(--ink2)] hover:text-[var(--ink)] mb-4" onClick={onBack}>← 돌아가기</button>
+      <h2 className="serif text-2xl font-bold mb-1">🔁 Review</h2>
+      <p className="text-xs text-[var(--ink2)] mb-5">Step 4 · 누적 복습으로 회화 실력을 다집니다</p>
+      <Section title="복습 범위" emoji="🎯">
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={()=>setScope("book")} disabled={!curBook} className={"btn px-4 py-2 rounded-lg text-sm border "+(scope==="book"?"bg-[var(--accent)] text-white border-[var(--accent)]":"border-[var(--line)]")}>이 원서만{curBook?` (${curBook.title})`:""}</button>
+          <button onClick={()=>setScope("all")} className={"btn px-4 py-2 rounded-lg text-sm border "+(scope==="all"?"bg-[var(--accent)] text-white border-[var(--accent)]":"border-[var(--line)]")}>모든 원서 (누적복습)</button>
+        </div>
+        <p className="text-xs text-[var(--ink2)] mt-2">단어 {pool.words.length} · 구문 {pool.phrases.length} · 문장 {pool.sentences.length}</p>
+      </Section>
+      <Section title="무엇을 연습할까요?" emoji="✏️">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <MenuCard active={type==="words"} title="단어" desc="1회 30개" emoji="🔤" onClick={()=>{setType("words"); setMode(null);}} />
+          <MenuCard active={type==="phrases"} title="구문" desc="1회 20개" emoji="🧩" onClick={()=>{setType("phrases"); setMode(null);}} />
+          <MenuCard active={type==="sentences"} title="문장 만들기" desc="1회 15개" emoji="🗣️" onClick={()=>{setType("sentences"); setMode(null);}} />
+        </div>
+      </Section>
+      {type==="words" && <Section title="단어 연습 방식" emoji="🔤"><div className="grid gap-2 sm:grid-cols-3">
+        <ModeBtn onClick={()=>setMode("ko2en")} title="한글 → 영어" desc="영어로 말해보고 확인 (확인 후 발음)" />
+        <ModeBtn onClick={()=>setMode("en2ko")} title="영어 → 한글" desc="뜻 맞추기 (처음부터 발음)" />
+        <ModeBtn onClick={()=>setMode("listen")} title="발음만 듣기" desc="듣고 뜻 고르기 (선택형)" />
+      </div></Section>}
+      {type==="phrases" && <Section title="구문 연습 방식" emoji="🧩"><div className="grid gap-2 sm:grid-cols-3">
+        <ModeBtn onClick={()=>setMode("ko2en")} title="한글 → 영어" desc="영어로 말해보고 확인" />
+        <ModeBtn onClick={()=>setMode("en2ko")} title="영어 → 한글" desc="뜻 말해보고 확인 (발음)" />
+        <ModeBtn onClick={()=>setMode("apply")} title="원어민 표현 ↔ 뜻" desc="실제 표현 보고 반대로 맞추기" />
+      </div></Section>}
+      {type==="sentences" && <Section title="문장 만들기" emoji="🗣️">
+        <p className="text-sm text-[var(--ink2)] mb-3">한국어 뜻을 보고 영어로 말하면(또는 입력), 원어민이 쓸 법한 자연스러운 표현으로 교정하고 발음·인토네이션까지 들려줍니다.</p>
+        <Btn onClick={()=>setMode("go")}>시작하기</Btn>
+      </Section>}
+    </div>
+  );
+}
+const MenuCard=({active,title,desc,emoji,onClick})=>(<button onClick={onClick} className={"btn card rounded-xl p-4 text-left "+(active?"ring-2 ring-[var(--accent)]":"")}><div className="text-2xl mb-1">{emoji}</div><div className="font-bold">{title}</div><div className="text-xs text-[var(--ink2)]">{desc}</div></button>);
+const ModeBtn=({title,desc,onClick})=>(<button onClick={onClick} className="btn text-left border border-[var(--line)] rounded-lg p-3 hover:bg-[var(--paper2)]"><div className="font-medium text-sm">{title}</div><div className="text-xs text-[var(--ink2)] mt-1">{desc}</div></button>);
+const ReviewShell=({title,onBack,children})=>(<div className="fade"><button className="text-sm text-[var(--ink2)] hover:text-[var(--ink)] mb-3" onClick={onBack}>← 복습 메뉴</button><h2 className="serif text-xl font-bold mb-4">{title}</h2>{children}</div>);
+
+/* ============================== App (Firebase 동기화) ============================== */
+function App(){
+  const init = loadLocal();
+  const [settings,setSettings]=useState(init.settings);
+  const [books,setBooks]=useState(init.books);
+  const [screen,setScreen]=useState("home");
+  const [currentBookId,setCurrentBookId]=useState(null);
+  const [showSettings,setShowSettings]=useState(false);
+  const [user,setUser]=useState(null);
+  const [sync,setSync]=useState("local");   // local / 연결중 / cloud / 오류
+
+  const fbRef=useRef(null), unsubRef=useRef(null), booksRef=useRef(books), settingsRef=useRef(settings), lastSyncedRef=useRef(JSON.stringify(books));
+  useEffect(()=>{ booksRef.current=books; },[books]);
+  useEffect(()=>{ settingsRef.current=settings; },[settings]);
+
+  // gApi(발음/STT) 동기화
+  useEffect(()=>{ gApi.key=settings.googleKey||""; gApi.voice=settings.voice||"en-US-Neural2-F"; },[settings.googleKey, settings.voice]);
+
+  // 설정 로컬 저장
+  useEffect(()=>{ saveLocal(booksRef.current, settings); },[settings]);
+
+  // Firebase 초기화 (config 변경 시)
+  useEffect(()=>{
+    if(!settings.firebaseConfig || !window.firebase){ return; }
+    let cfg; try{ cfg = parseFirebaseConfig(settings.firebaseConfig); }catch(e){ setSync("오류"); return; }
+    try{
+      const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
+      const auth = firebase.auth(); const db = firebase.firestore();
+      fbRef.current = { app, auth, db };
+      setSync("연결중");
+      const off = auth.onAuthStateChanged(u=>{ setUser(u||null); });
+      return ()=>{ off && off(); };
+    }catch(e){ setSync("오류"); }
+  },[settings.firebaseConfig]);
+
+  // 로그인 시 Firestore 구독
+  useEffect(()=>{
+    if(unsubRef.current){ unsubRef.current(); unsubRef.current=null; }
+    if(!user || !fbRef.current){ if(!user) setSync(settings.firebaseConfig?"연결중":"local"); return; }
+    const ref = fbRef.current.db.collection("users").doc(user.uid);
+    setSync("cloud");
+    unsubRef.current = ref.onSnapshot(snap=>{
+      if(!snap.exists){ ref.set({ books:booksRef.current, updatedAt:Date.now() }).catch(()=>{}); return; }
+      const remote = snap.data().books||[];
+      const js = JSON.stringify(remote);
+      if(js!==lastSyncedRef.current){ lastSyncedRef.current=js; setBooks(remote); }
+    }, ()=> setSync("오류"));
+    return ()=>{ if(unsubRef.current){ unsubRef.current(); unsubRef.current=null; } };
+  },[user]);
+
+  // books 변경 → 저장 (클라우드 or 로컬)
+  useEffect(()=>{
+    const js=JSON.stringify(books);
+    saveLocal(books, settingsRef.current);
+    if(js===lastSyncedRef.current) return;
+    lastSyncedRef.current=js;
+    if(user && fbRef.current){ fbRef.current.db.collection("users").doc(user.uid).set({ books, updatedAt:Date.now() }).catch(()=>{}); }
+  },[books, user]);
+
+  const update=fn=>setBooks(prev=>{ const n=structuredClone(prev); fn(n); return n; });
+  function createBook(title){ update(n=> n.unshift({id:uid(),title,createdAt:Date.now(),entries:[]})); }
+  function deleteBook(id){ update(n=>{ const i=n.findIndex(b=>b.id===id); if(i>=0) n.splice(i,1); }); }
+  function addEntry(entry){ update(n=>{ const b=n.find(x=>x.id===currentBookId); if(b) b.entries.push(entry); }); setScreen("book"); }
+  function deleteEntry(eid){ update(n=>{ const b=n.find(x=>x.id===currentBookId); if(b) b.entries=b.entries.filter(e=>e.id!==eid); }); }
+
+  async function signIn(){
+    if(!fbRef.current){ setShowSettings(true); return; }
+    try{ const p=new firebase.auth.GoogleAuthProvider(); await fbRef.current.auth.signInWithPopup(p); }
+    catch(e){ alert("로그인 실패: "+(e.message||e)); }
+  }
+  async function signOut(){ try{ await fbRef.current.auth.signOut(); }catch(e){} }
+
+  const currentBook=books.find(b=>b.id===currentBookId);
+  const cloudReady = !!settings.firebaseConfig;
+
+  return (
+    <div className="min-h-screen">
+      <header className="border-b border-[var(--line)] bg-[var(--paper)]/90 backdrop-blur sticky top-0 z-30">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+          <button className="text-left" onClick={()=>{setScreen("home"); setCurrentBookId(null);}}>
+            <span className="serif text-lg font-bold">원서 회화 노트</span>
+            <span className="text-[11px] text-[var(--ink2)] ml-2 hidden sm:inline">English Reading Studio</span>
+          </button>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-[11px] px-2 py-1 rounded-full" style={{background: sync==="cloud"?"#e8f1ea":"#efe7d6", color: sync==="cloud"?"#3f7d50":"#5c544a"}}>
+              {sync==="cloud"?"☁ 동기화 중":sync==="연결중"?"연결 중…":sync==="오류"?"⚠ 설정 확인":"이 기기 저장"}
+            </span>
+            {cloudReady ? (
+              user ? <button className="btn text-xs underline" onClick={signOut} title={user.email}>로그아웃</button>
+                   : <Btn kind="soft" onClick={signIn}>Google 로그인</Btn>
+            ) : null}
+            <button className="btn px-2 py-1 rounded hover:bg-[var(--paper2)]" onClick={()=>setShowSettings(true)}>⚙️</button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-3xl mx-auto px-4 py-6">
+        {(!settings.geminiKey || !cloudReady) && screen==="home" && (
+          <div className="card rounded-lg p-3 mb-5 text-xs text-[var(--ink2)] flex items-center justify-between gap-2">
+            <span>💡 ⚙️ 설정에서 ① Gemini 키(사진 분석·무료) ③ Firebase 설정(기기 간 동기화)을 넣으세요. 발음·받아쓰기는 그냥 무료로 작동합니다.</span>
+            <Btn kind="soft" onClick={()=>setShowSettings(true)}>설정</Btn>
+          </div>
+        )}
+        {screen==="home" && <Home books={books} onCreate={createBook} onDelete={deleteBook} onOpen={id=>{setCurrentBookId(id); setScreen("book");}} />}
+        {screen==="book" && currentBook && <BookView book={currentBook} onBack={()=>{setScreen("home"); setCurrentBookId(null);}} onAdd={()=>setScreen("add")} onReview={()=>setScreen("review")} onDeleteEntry={deleteEntry} />}
+        {screen==="add" && currentBook && <AddPages book={currentBook} settings={settings} onSaved={addEntry} onBack={()=>setScreen("book")} onNeedKey={()=>setShowSettings(true)} />}
+        {screen==="review" && <Review books={books} currentBookId={currentBookId} settings={settings} onBack={()=>setScreen(currentBook?"book":"home")} onNeedKey={()=>setShowSettings(true)} />}
+      </main>
+
+      {showSettings && <Settings settings={settings} onClose={()=>setShowSettings(false)} onSave={s=>{ setSettings(s); setShowSettings(false); }} />}
+
+      <footer className="max-w-3xl mx-auto px-4 py-8 text-center text-[11px] text-[var(--ink2)]">
+        원서 데이터는 로그인 시 구글 클라우드(Firestore)에 실시간 저장됩니다 · 키는 각 기기에만 보관됩니다
+      </footer>
+    </div>
+  );
+}
+
+/* Firebase config 붙여넣기 파싱 (JSON 또는 JS 객체 모두 허용) */
+function parseFirebaseConfig(s){
+  s=s.trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1);
+  try{ return JSON.parse(s); }catch(e){}
+  let t=s.replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g,'$1"$2":').replace(/'/g,'"').replace(/,(\s*})/g,'$1');
+  return JSON.parse(t);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
