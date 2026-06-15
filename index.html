@@ -261,8 +261,9 @@ JSON 스키마:
 규칙:
 - words: A2에게 유용하거나 모를 만한 단어 위주(쉬운 기능어 제외). 자주 쓰는 뜻은 빠짐없이.
 - examples: 평서문/의문문 번갈아, 회화에서 바로 쓸 자연스러운 문장.
-- sentences: 원문을 한 문장씩 영어→한국어, 자연스럽게.
-- phrases: 문법 시험용 X, 회화에서 자주 쓰거나 이해 어려운 패턴 위주, 원어민 실제 표현 포함.`;
+- 모든 한국어 번역(examples의 ko, sentences의 ko 포함)은 **자연스러운 한국어로 의역**하세요. 영어 어순을 그대로 옮긴 어색한 직역·기계번역 말투를 절대 쓰지 마세요. 'you'를 무조건 '너/당신'으로 옮기지 말고, 한국어에서 자연스럽게(주어 생략 등) 표현하세요. 말투는 기본적으로 **부드러운 존댓말(해요체)**로 통일하되, 한국 사람이 실제로 말하듯 자연스럽게 다듬으세요.
+- sentences: 원문을 한 문장씩 끊어 영어→자연스러운 한국어.
+- phrases: **반드시 2개 이상(가능하면 3~5개) 추출**하세요. 회화에서 자주 쓰거나 A2 학습자가 이해하기 어려운 패턴 위주(예: used to, be surrounded by, row upon row of, the next thing you know, as ... as, full of 등). 본문에 그런 표현이 있으면 빼먹지 말고, 원어민 실제 표현(nativeExamples)을 함께 넣으세요. 정말 하나도 없을 때만 빈 배열로 두세요.`;
 }
 
 /* ============================== 공통 UI ============================== */
@@ -276,7 +277,7 @@ const Section = ({title, emoji, children, sub}) => (
   </div>
 );
 const Btn = ({children, onClick, kind="primary", className="", ...rest}) => {
-  const styles={ primary:"bg-[var(--accent)] text-white hover:bg-[var(--accent2)]", ghost:"bg-transparent text-[var(--ink)] border border-[var(--line)] hover:bg-[var(--paper2)]", soft:"bg-[var(--paper2)] text-[var(--ink)] hover:bg-[#e4d8c0]", danger:"bg-[var(--warn)] text-white hover:opacity-90" };
+  const styles={ primary:"bg-[var(--accent)] text-white hover:bg-[var(--accent2)]", ghost:"bg-transparent text-[var(--ink)] border border-[var(--line)] hover:bg-[var(--paper2)]", soft:"bg-[var(--paper2)] text-[var(--ink)] hover:bg-[#e4d8c0]", danger:"bg-[var(--warn)] text-white hover:opacity-90", good:"bg-[var(--good)] text-white hover:opacity-90" };
   return <button onClick={onClick} className={`btn rounded-lg px-4 py-2 text-sm font-medium ${styles[kind]} ${className}`} {...rest}>{children}</button>;
 };
 
@@ -416,6 +417,8 @@ function EntryDetail({entry}){
         </div>
       </Section>
       <Section title="문장 번역" emoji="③" sub="영어 원본 → 한국어">
+        {(entry.sentences||[]).length>0 &&
+          <Btn kind="soft" className="mb-3" onClick={()=>speak((entry.sentences||[]).map(s=>s.en).join("  "))}>▶ 전체 듣기 (무료)</Btn>}
         <div className="space-y-2">
           {(entry.sentences||[]).map((s,i)=>(
             <div key={i} className="text-sm">
@@ -507,12 +510,42 @@ function buildPool(books, scope, bookId){
 }
 const shuffle = a=>{ const r=[...a]; for(let i=r.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; } return r; };
 
-function FlashRunner({items,total,renderFront,renderBack,frontSpeak,onDone,label}){
+function FlashRunner({items,total,renderFront,renderBack,frontSpeak,backSpeak,qText,aText,aSpeak,onDone,label}){
   const deck=useMemo(()=>shuffle(items).slice(0,total),[items,total]);
-  const [i,setI]=useState(0); const [show,setShow]=useState(false);
-  if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 항목이 없습니다.</p>;
-  if(i>=deck.length) return <div className="text-center py-8 fade"><p className="serif text-xl font-bold mb-3">완료! 🎉 {deck.length}개 복습</p><Btn onClick={onDone}>복습 메뉴로</Btn></div>;
+  const [i,setI]=useState(0); const [show,setShow]=useState(false); const [results,setResults]=useState([]);
   const cur=deck[i];
+  useEffect(()=>{ if(show && backSpeak && cur) speak(backSpeak(cur)); }, [show, i]);
+  if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 항목이 없습니다.</p>;
+  if(i>=deck.length){
+    const correct=results.filter(r=>r.correct).length;
+    const wrong=results.filter(r=>!r.correct);
+    return (
+      <div className="fade">
+        <div className="text-center mb-5">
+          <p className="serif text-2xl font-bold mb-1">완료! 🎉</p>
+          <p className="text-lg">점수 <span className="font-bold text-[var(--accent)]">{correct}</span> / {deck.length}</p>
+        </div>
+        {wrong.length>0 ? (
+          <div className="mb-5">
+            <p className="font-bold text-sm mb-2">❌ 틀린 문제 ({wrong.length})</p>
+            <div className="space-y-2">
+              {wrong.map((r,k)=>(
+                <div key={k} className="card rounded-lg p-3 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs text-[var(--ink2)] truncate">{qText?qText(r.item):""}</p>
+                    <p className="serif font-bold">{aText?aText(r.item):""}</p>
+                  </div>
+                  {aSpeak && <SpeakBtn text={aSpeak(r.item)} label="🔊" cls="shrink-0" />}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : <p className="text-center text-[var(--good)] font-bold mb-5">전부 맞았어요! 완벽해요 👏</p>}
+        <div className="text-center"><Btn onClick={onDone}>복습 메뉴로</Btn></div>
+      </div>
+    );
+  }
+  function mark(ok){ setResults(rs=>[...rs,{item:cur,correct:ok}]); setShow(false); setI(i+1); }
   return (
     <div className="fade">
       <div className="flex justify-between text-xs text-[var(--ink2)] mb-2"><span>{label}</span><span>{i+1} / {deck.length}</span></div>
@@ -523,17 +556,38 @@ function FlashRunner({items,total,renderFront,renderBack,frontSpeak,onDone,label
         {show ? <div className="mt-3 pt-3 border-t border-[var(--line)] w-full fade">{renderBack(cur)}</div>
               : <Btn kind="soft" className="mt-2" onClick={()=>setShow(true)}>정답 확인</Btn>}
       </div>
-      {show && <div className="flex gap-2 justify-center mt-4"><Btn kind="ghost" onClick={()=>{setShow(false); setI(i+1);}}>다시 볼래요</Btn><Btn onClick={()=>{setShow(false); setI(i+1);}}>다음 →</Btn></div>}
+      {show && <div className="flex gap-2 justify-center mt-4">
+        <Btn kind="danger" onClick={()=>mark(false)}>❌ 틀렸어요</Btn>
+        <Btn kind="good" onClick={()=>mark(true)}>✅ 맞았어요</Btn>
+      </div>}
     </div>
   );
 }
 function ListenChoice({words,total,onDone}){
   const deck=useMemo(()=>shuffle(words.filter(w=>(w.meanings||[]).length)).slice(0,total),[words,total]);
-  const [i,setI]=useState(0); const [picked,setPicked]=useState(null); const [score,setScore]=useState(0);
+  const [i,setI]=useState(0); const [picked,setPicked]=useState(null); const [score,setScore]=useState(0); const [wrong,setWrong]=useState([]);
   const options=useMemo(()=>{ if(i>=deck.length) return []; const c=deck[i]; const o=shuffle(words.filter(w=>w!==c&&(w.meanings||[]).length)).slice(0,3); return shuffle([c,...o]); },[i,deck,words]);
   useEffect(()=>{ if(deck[i]) speak(deck[i].word); },[i]);
   if(deck.length===0) return <p className="text-sm text-[var(--ink2)]">복습할 단어가 없습니다.</p>;
-  if(i>=deck.length) return <div className="text-center py-8 fade"><p className="serif text-xl font-bold mb-2">완료! 🎉</p><p className="mb-3">{deck.length}개 중 {score}개 정답</p><Btn onClick={onDone}>복습 메뉴로</Btn></div>;
+  if(i>=deck.length) return (
+    <div className="fade">
+      <div className="text-center mb-5"><p className="serif text-2xl font-bold mb-1">완료! 🎉</p><p className="text-lg">점수 <span className="font-bold text-[var(--accent)]">{score}</span> / {deck.length}</p></div>
+      {wrong.length>0 ? (
+        <div className="mb-5">
+          <p className="font-bold text-sm mb-2">❌ 틀린 문제 ({wrong.length})</p>
+          <div className="space-y-2">
+            {wrong.map((w,k)=>(
+              <div key={k} className="card rounded-lg p-3 flex items-center justify-between gap-2">
+                <div className="min-w-0"><p className="serif font-bold">{w.word}</p><p className="text-xs text-[var(--ink2)] truncate">{(w.meanings||[]).join(", ")}</p></div>
+                <SpeakBtn text={w.word} label="🔊" cls="shrink-0" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : <p className="text-center text-[var(--good)] font-bold mb-5">전부 맞았어요! 완벽해요 👏</p>}
+      <div className="text-center"><Btn onClick={onDone}>복습 메뉴로</Btn></div>
+    </div>
+  );
   const cur=deck[i];
   return (
     <div className="fade">
@@ -543,7 +597,7 @@ function ListenChoice({words,total,onDone}){
         <div className="grid gap-2 mt-4">
           {options.map((o,j)=>{ const isC=o===cur,isP=picked===o; let cls="border-[var(--line)] hover:bg-[var(--paper2)]";
             if(picked){ if(isC) cls="border-[var(--good)] bg-[#e8f1ea]"; else if(isP) cls="border-[var(--warn)] bg-[#f5e6e1]"; }
-            return <button key={j} disabled={!!picked} onClick={()=>{ setPicked(o); if(o===cur) setScore(s=>s+1); }} className={"btn text-sm text-left px-4 py-2 rounded-lg border "+cls}>{(o.meanings||[]).join(", ")}</button>;
+            return <button key={j} disabled={!!picked} onClick={()=>{ setPicked(o); if(o===cur) setScore(s=>s+1); else setWrong(ws=>[...ws,cur]); }} className={"btn text-sm text-left px-4 py-2 rounded-lg border "+cls}>{(o.meanings||[]).join(", ")}</button>;
           })}
         </div>
         {picked && <div className="mt-4 fade"><p className="serif font-bold">{cur.word} <PosBadge pos={cur.pos} /></p><Btn className="mt-3" onClick={()=>{ setPicked(null); setI(i+1); }}>다음 →</Btn></div>}
@@ -614,10 +668,12 @@ function Review({books,currentBookId,settings,onBack,onNeedKey}){
   if(type==="words"&&mode){
     return (
       <ReviewShell title="단어 복습 · 30개" onBack={reset}>
-        {mode==="ko2en" && <FlashRunner items={pool.words} total={30} label="한글 → 영어"
+        {mode==="ko2en" && <FlashRunner items={pool.words} total={30} label="한글 → 영어" backSpeak={w=>w.word}
+          qText={w=>(w.meanings||[]).join(", ")} aText={w=>w.word} aSpeak={w=>w.word}
           renderFront={w=><div><p className="text-xs text-[var(--ink2)] mb-1">이 뜻의 영어 단어는?</p><p className="serif text-2xl font-bold">{(w.meanings||[]).join(", ")}</p><p className="text-xs mt-1"><PosBadge pos={w.pos}/></p></div>}
           renderBack={w=><div><p className="serif text-2xl font-bold">{w.word}</p><SpeakBtn text={w.word} label="🔊 발음 듣기" cls="text-sm mt-1"/></div>} />}
         {mode==="en2ko" && <FlashRunner items={pool.words} total={30} label="영어 → 한글" frontSpeak={w=>w.word}
+          qText={w=>w.word} aText={w=>(w.meanings||[]).join(", ")} aSpeak={w=>w.word}
           renderFront={w=><div><p className="serif text-2xl font-bold">{w.word}</p><p className="text-xs mt-1"><PosBadge pos={w.pos}/></p></div>}
           renderBack={w=><p className="text-lg">{(w.meanings||[]).join(", ")}</p>} />}
         {mode==="listen" && <ListenChoice words={pool.words} total={30} onDone={reset} />}
@@ -628,13 +684,16 @@ function Review({books,currentBookId,settings,onBack,onNeedKey}){
     const flat=[]; pool.phrases.forEach(p=>(p.nativeExamples||[]).forEach(ex=>flat.push({...ex,phrase:p.phrase})));
     return (
       <ReviewShell title="구문 복습 · 20개" onBack={reset}>
-        {mode==="ko2en" && <FlashRunner items={pool.phrases} total={20} label="한글 → 영어"
+        {mode==="ko2en" && <FlashRunner items={pool.phrases} total={20} label="한글 → 영어" backSpeak={p=>p.phrase}
+          qText={p=>p.meaning} aText={p=>p.phrase} aSpeak={p=>p.phrase}
           renderFront={p=><div><p className="text-xs text-[var(--ink2)] mb-1">이 뜻의 영어 구문은?</p><p className="serif text-xl font-bold">{p.meaning}</p></div>}
           renderBack={p=><div><p className="serif text-xl font-bold">{p.phrase}</p>{(p.nativeExamples||[]).map((ex,k)=><p key={k} className="text-sm mt-1">{ex.en} <SpeakBtn text={ex.en} cls="text-xs"/> <span className="text-[var(--ink2)]">— {ex.ko}</span></p>)}</div>} />}
         {mode==="en2ko" && <FlashRunner items={pool.phrases} total={20} label="영어 → 한글" frontSpeak={p=>p.phrase}
+          qText={p=>p.phrase} aText={p=>p.meaning} aSpeak={p=>p.phrase}
           renderFront={p=><p className="serif text-xl font-bold">{p.phrase}</p>}
           renderBack={p=><div><p className="text-base">{p.meaning}</p>{p.explanation&&<p className="text-xs text-[var(--ink2)] mt-1">{p.explanation}</p>}</div>} />}
         {mode==="apply" && <FlashRunner items={flat} total={20} label="원어민 표현 ↔ 뜻" frontSpeak={x=>x.en}
+          qText={x=>x.en} aText={x=>x.ko} aSpeak={x=>x.en}
           renderFront={x=><div><p className="text-xs text-[var(--ink2)] mb-1">[{x.phrase}] 이 표현의 뜻은?</p><p className="serif text-xl font-bold">{x.en}</p></div>}
           renderBack={x=><p className="text-lg">{x.ko}</p>} />}
       </ReviewShell>
