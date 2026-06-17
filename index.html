@@ -37,7 +37,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 /* ============================== 로컬 설정/오프라인 저장 ============================== */
 const STORE_KEY = "engReaderApp_v2";
-const DEFAULT_SETTINGS = { geminiKey:"", geminiModel:"gemini-2.5-flash", googleKey:"", voice:"en-US-Neural2-F", driveUrl:"", spaceId:"" };
+const DEFAULT_SETTINGS = { geminiKey:"", geminiModel:"gemini-2.5-flash" };
 let memBooks = null, memSettings = null;
 
 function loadLocal(){
@@ -54,6 +54,10 @@ function saveLocal(books, settings){
 const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
 
 /* ============================== 구글 드라이브(Apps Script) 저장 ============================== */
+// 저장 주소(고정) — 설정에서 건드리지 않음
+const DRIVE_URL = "https://script.google.com/macros/s/AKfycbxyEVOms54jGCfSSOlg3Q-2mblUay_sZ4---_OEpetjzmivC5TyZAYtvK4u3ikgIjw/exec";
+// 공유 저장 공간(고정) — 누가 접속해도 같은 데이터를 봅니다
+const SPACE_ID = "commang-shared";
 async function driveLoad(url, spaceId){
   const u = url + (url.includes("?")?"&":"?") + "spaceId=" + encodeURIComponent(spaceId);
   const res = await fetch(u, { method:"GET" });
@@ -323,39 +327,18 @@ const Btn = ({children, onClick, kind="primary", className="", ...rest}) => {
 function Settings({settings, onSave, onClose}){
   const [s, setS] = useState(settings);
   const set = (k,v)=> setS(p=>({...p,[k]:v}));
-  const voices = ["en-US-Neural2-F","en-US-Neural2-D","en-US-Neural2-J","en-US-Neural2-C","en-US-Wavenet-F","en-US-Studio-O"];
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>
       <div className="card rounded-2xl p-6 w-full max-w-lg my-8" onClick={e=>e.stopPropagation()}>
         <h2 className="serif text-xl font-bold mb-1">⚙️ 설정</h2>
-        <p className="text-xs text-[var(--ink2)] mb-4">모든 키는 이 기기 브라우저에만 저장됩니다. 깃허브 저장소에는 올라가지 않습니다.</p>
+        <p className="text-xs text-[var(--ink2)] mb-4">키는 이 기기 브라우저에만 저장됩니다. 깃허브 저장소에는 올라가지 않습니다.</p>
 
-        <p className="serif font-bold text-sm mt-2 mb-2">① 사진 분석·문장 교정 (Google Gemini · 무료)</p>
+        <p className="serif font-bold text-sm mt-2 mb-2">사진 분석 API 키 (Google Gemini · 무료)</p>
         <input type="password" value={s.geminiKey} onChange={e=>set("geminiKey",e.target.value)} placeholder="AIza... (Google AI Studio 키)"
           className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
-        <input value={s.geminiModel} onChange={e=>set("geminiModel",e.target.value)} placeholder="gemini-2.5-flash"
-          className="w-full mb-1 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
-        <p className="text-[11px] text-[var(--ink2)] mb-4">aistudio.google.com → ‘Get API key’에서 무료 발급 (카드 불필요). 하루 1,500건까지 무료.</p>
-
-        <p className="serif font-bold text-sm mt-2 mb-2">② 미국 발음 + 받아쓰기 (선택)</p>
-        <p className="text-[11px] text-[var(--ink2)] mb-2">비워두면 브라우저 무료 발음·음성인식이 자동으로 쓰입니다(카드 불필요). 더 좋은 발음을 원할 때만 Google Cloud TTS/STT 키를 넣으세요.</p>
-        <input type="password" value={s.googleKey} onChange={e=>set("googleKey",e.target.value)} placeholder="AIza... (선택: Google Cloud TTS·STT 키)"
-          className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
-        <label className="text-xs text-[var(--ink2)]">발음 음성</label>
-        <select value={s.voice} onChange={e=>set("voice",e.target.value)}
-          className="w-full mt-1 mb-4 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm">
-          {voices.map(v=><option key={v} value={v}>{v}</option>)}
-        </select>
-
-        <p className="serif font-bold text-sm mt-2 mb-2">③ 기기 간 저장 (구글 드라이브)</p>
-        <label className="text-xs text-[var(--ink2)]">드라이브 저장 주소 (Apps Script 웹앱 URL)</label>
-        <input value={s.driveUrl} onChange={e=>set("driveUrl",e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"
-          className="w-full mt-1 mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
-        <label className="text-xs text-[var(--ink2)]">저장 공간 이름 (영문/숫자, 본인만의 이름)</label>
-        <input value={s.spaceId} onChange={e=>set("spaceId",e.target.value.replace(/[^a-zA-Z0-9_-]/g,""))} placeholder="예: sm-english"
-          className="w-full mt-1 mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
         <p className="text-[11px] text-[var(--ink2)] mb-4 leading-relaxed">
-          구글 드라이브에 만든 저장 스크립트의 주소를 넣으세요. 여러 기기에서 같은 주소·같은 공간 이름을 쓰면 같은 데이터가 보입니다. (저장은 자동, 다른 기기 내용은 상단 ‘↻ 불러오기’로 가져옵니다.)
+          aistudio.google.com → ‘Get API key’에서 무료 발급 (카드 불필요, 하루 1,500건 무료).<br/>
+          · 공부한 내용은 자동으로 저장·공유되고, 발음·받아쓰기는 그냥 무료로 작동해요.
         </p>
 
         <div className="flex gap-2 justify-end">
@@ -799,18 +782,16 @@ function App(){
   useEffect(()=>{ gApi.key=settings.googleKey||""; gApi.voice=settings.voice||"en-US-Neural2-F"; },[settings.googleKey, settings.voice]);
   useEffect(()=>{ saveLocal(booksRef.current, settings); },[settings]);
 
-  const cloudReady = !!(settings.driveUrl && settings.spaceId);
+  const cloudReady = true; // 항상 공유 저장 공간 사용
 
   async function reload(){
-    const st=settingsRef.current;
-    if(!(st.driveUrl && st.spaceId)) return;
     setSync("loading");
     try{
-      const remote = await driveLoad(st.driveUrl, st.spaceId);
+      const remote = await driveLoad(DRIVE_URL, SPACE_ID);
       if(remote.length===0 && booksRef.current.length>0){
         lastSyncedRef.current = JSON.stringify(booksRef.current);
         loadedRef.current = true;
-        await driveSave(st.driveUrl, st.spaceId, booksRef.current);
+        await driveSave(DRIVE_URL, SPACE_ID, booksRef.current);
         setSync("saved"); return;
       }
       lastSyncedRef.current = JSON.stringify(remote);
@@ -820,16 +801,12 @@ function App(){
     }catch(e){ setSync("error"); }
   }
 
-  // 드라이브 주소/공간이 생기거나 바뀌면 자동 불러오기
-  useEffect(()=>{
-    loadedRef.current=false;
-    if(cloudReady) reload(); else setSync("local");
-  }, [settings.driveUrl, settings.spaceId]);
+  // 앱을 열면 공유 저장 내용을 자동으로 불러옴
+  useEffect(()=>{ reload(); }, []);
 
   // books 변경 → 로컬 저장 + 드라이브 자동 저장(디바운스)
   useEffect(()=>{
     saveLocal(books, settingsRef.current);
-    if(!cloudReady) return;
     const js = JSON.stringify(books);
     if(js===lastSyncedRef.current) return;
     if(!loadedRef.current) return; // 첫 불러오기 전엔 저장 안 함(덮어쓰기 방지)
@@ -837,7 +814,7 @@ function App(){
     setSync("saving");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async ()=>{
-      try{ await driveSave(settings.driveUrl, settings.spaceId, books); setSync("saved"); }
+      try{ await driveSave(DRIVE_URL, SPACE_ID, books); setSync("saved"); }
       catch(e){ setSync("error"); }
     }, 800);
   },[books]);
@@ -869,9 +846,9 @@ function App(){
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-6">
-        {(!settings.geminiKey || !cloudReady) && screen==="home" && (
+        {!settings.geminiKey && screen==="home" && (
           <div className="card rounded-lg p-3 mb-5 text-xs text-[var(--ink2)] flex items-center justify-between gap-2">
-            <span>💡 ⚙️ 설정에서 ① Gemini 키(사진 분석·무료) ③ 드라이브 저장(기기 간 저장)을 넣으세요. 발음·받아쓰기는 그냥 무료로 작동합니다.</span>
+            <span>💡 ⚙️ 설정에서 Gemini API 키만 넣으면 시작! (무료) 공부 내용은 자동 저장·공유되고, 발음·받아쓰기도 그냥 무료로 작동합니다.</span>
             <Btn kind="soft" onClick={()=>setShowSettings(true)}>설정</Btn>
           </div>
         )}
