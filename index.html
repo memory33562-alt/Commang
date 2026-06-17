@@ -8,9 +8,6 @@
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
@@ -40,7 +37,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 /* ============================== 로컬 설정/오프라인 저장 ============================== */
 const STORE_KEY = "engReaderApp_v2";
-const DEFAULT_SETTINGS = { geminiKey:"", geminiModel:"gemini-2.5-flash", googleKey:"", voice:"en-US-Neural2-F", firebaseConfig:"" };
+const DEFAULT_SETTINGS = { geminiKey:"", geminiModel:"gemini-2.5-flash", googleKey:"", voice:"en-US-Neural2-F", driveUrl:"", spaceId:"" };
 let memBooks = null, memSettings = null;
 
 function loadLocal(){
@@ -55,6 +52,21 @@ function saveLocal(books, settings){
   try{ localStorage.setItem(STORE_KEY, JSON.stringify({books, settings})); }catch(e){}
 }
 const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
+
+/* ============================== 구글 드라이브(Apps Script) 저장 ============================== */
+async function driveLoad(url, spaceId){
+  const u = url + (url.includes("?")?"&":"?") + "spaceId=" + encodeURIComponent(spaceId);
+  const res = await fetch(u, { method:"GET" });
+  if(!res.ok) throw new Error("불러오기 실패 "+res.status);
+  const data = await res.json();
+  return Array.isArray(data.books) ? data.books : [];
+}
+async function driveSave(url, spaceId, books){
+  // Content-Type 미지정 → text/plain 처리되어 CORS 사전요청(preflight) 없이 동작
+  const res = await fetch(url, { method:"POST", body: JSON.stringify({ spaceId, data:{ books } }) });
+  if(!res.ok) throw new Error("저장 실패 "+res.status);
+  return res.json().catch(()=>({ok:true}));
+}
 
 /* ============================== Google TTS (+브라우저 대체) ============================== */
 let gApi = { key:"", voice:"en-US-Neural2-F" };
@@ -245,6 +257,32 @@ async function callGeminiJSON(settings, parts, schema=null, retries=2){
   throw lastErr || new Error("분석 실패");
 }
 function fileToBase64(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=()=>rej(new Error("read")); r.readAsDataURL(file); }); }
+// 사진을 보내기 전에 적당한 크기·JPEG로 변환 (폰 고화질/HEIC/PNG 모두 대응)
+function loadImageEl(file){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(file); const img=new Image();
+    img.onload=()=>{ URL.revokeObjectURL(url); res(img); };
+    img.onerror=()=>{ URL.revokeObjectURL(url); rej(new Error("이미지 디코드 실패")); };
+    img.src=url;
+  });
+}
+async function prepImage(file, maxDim=2000, quality=0.85){
+  try{
+    const img=await loadImageEl(file);
+    let w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+    if(!w||!h) throw new Error("크기 0");
+    const scale=Math.min(1, maxDim/Math.max(w,h));
+    w=Math.round(w*scale); h=Math.round(h*scale);
+    const c=document.createElement("canvas"); c.width=w; c.height=h;
+    c.getContext("2d").drawImage(img,0,0,w,h);
+    const b64=c.toDataURL("image/jpeg",quality).split(",")[1];
+    if(!b64) throw new Error("변환 실패");
+    return { data:b64, mediaType:"image/jpeg" };
+  }catch(e){
+    const b64=await fileToBase64(file);
+    return { data:b64, mediaType:file.type||"image/jpeg" };
+  }
+}
 
 function analysisPrompt(prevTail){
   return `당신은 영어 회화 학습 튜터입니다. 학습자는 CEFR A2 수준이며 목표는 회화(스피킹) 향상입니다 (문법 시험 X, 토익/수능 X).
@@ -309,12 +347,15 @@ function Settings({settings, onSave, onClose}){
           {voices.map(v=><option key={v} value={v}>{v}</option>)}
         </select>
 
-        <p className="serif font-bold text-sm mt-2 mb-2">③ 기기 간 저장·동기화 (Firebase 설정)</p>
-        <textarea value={s.firebaseConfig} onChange={e=>set("firebaseConfig",e.target.value)} rows={6}
-          placeholder={'{\n  "apiKey": "...",\n  "authDomain": "...",\n  "projectId": "...",\n  "storageBucket": "...",\n  "messagingSenderId": "...",\n  "appId": "..."\n}'}
-          className="w-full mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-xs font-mono" />
+        <p className="serif font-bold text-sm mt-2 mb-2">③ 기기 간 저장 (구글 드라이브)</p>
+        <label className="text-xs text-[var(--ink2)]">드라이브 저장 주소 (Apps Script 웹앱 URL)</label>
+        <input value={s.driveUrl} onChange={e=>set("driveUrl",e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"
+          className="w-full mt-1 mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
+        <label className="text-xs text-[var(--ink2)]">저장 공간 이름 (영문/숫자, 본인만의 이름)</label>
+        <input value={s.spaceId} onChange={e=>set("spaceId",e.target.value.replace(/[^a-zA-Z0-9_-]/g,""))} placeholder="예: sm-english"
+          className="w-full mt-1 mb-2 px-3 py-2 rounded-lg border border-[var(--line)] bg-white text-sm" />
         <p className="text-[11px] text-[var(--ink2)] mb-4 leading-relaxed">
-          Firebase 콘솔의 웹 앱 설정값을 붙여넣으세요. 저장 후 상단 ‘Google 로그인’을 누르면 다른 기기에서도 같은 계정으로 동기화됩니다.
+          구글 드라이브에 만든 저장 스크립트의 주소를 넣으세요. 여러 기기에서 같은 주소·같은 공간 이름을 쓰면 같은 데이터가 보입니다. (저장은 자동, 다른 기기 내용은 상단 ‘↻ 불러오기’로 가져옵니다.)
         </p>
 
         <div className="flex gap-2 justify-end">
@@ -458,7 +499,7 @@ function AddPages({book, settings, onSaved, onBack, onNeedKey}){
     setError(""); setLoading(true); setResult(null);
     try{
       const parts=[];
-      for(const f of files){ const b64=await fileToBase64(f); parts.push({ inline_data:{ mime_type:f.type||"image/jpeg", data:b64 } }); }
+      for(const f of files){ const im=await prepImage(f); parts.push({ inline_data:{ mime_type:im.mediaType, data:im.data } }); }
       parts.push({ text: analysisPrompt(prevTail) });
       const parsed=await callGeminiJSON(settings, parts, ANALYSIS_SCHEMA, 2);
       setResult(parsed);
@@ -742,7 +783,7 @@ const MenuCard=({active,title,desc,emoji,onClick})=>(<button onClick={onClick} c
 const ModeBtn=({title,desc,onClick})=>(<button onClick={onClick} className="btn text-left border border-[var(--line)] rounded-lg p-3 hover:bg-[var(--paper2)]"><div className="font-medium text-sm">{title}</div><div className="text-xs text-[var(--ink2)] mt-1">{desc}</div></button>);
 const ReviewShell=({title,onBack,children})=>(<div className="fade"><button className="text-sm text-[var(--ink2)] hover:text-[var(--ink)] mb-3" onClick={onBack}>← 복습 메뉴</button><h2 className="serif text-xl font-bold mb-4">{title}</h2>{children}</div>);
 
-/* ============================== App (Firebase 동기화) ============================== */
+/* ============================== App (구글 드라이브 저장) ============================== */
 function App(){
   const init = loadLocal();
   const [settings,setSettings]=useState(init.settings);
@@ -750,56 +791,56 @@ function App(){
   const [screen,setScreen]=useState("home");
   const [currentBookId,setCurrentBookId]=useState(null);
   const [showSettings,setShowSettings]=useState(false);
-  const [user,setUser]=useState(null);
-  const [sync,setSync]=useState("local");   // local / 연결중 / cloud / 오류
+  const [sync,setSync]=useState("local"); // local / loading / saving / saved / error
 
-  const fbRef=useRef(null), unsubRef=useRef(null), booksRef=useRef(books), settingsRef=useRef(settings), lastSyncedRef=useRef(JSON.stringify(books));
+  const booksRef=useRef(books), settingsRef=useRef(settings), lastSyncedRef=useRef(JSON.stringify(books)), saveTimer=useRef(null), loadedRef=useRef(false);
   useEffect(()=>{ booksRef.current=books; },[books]);
   useEffect(()=>{ settingsRef.current=settings; },[settings]);
-
-  // gApi(발음/STT) 동기화
   useEffect(()=>{ gApi.key=settings.googleKey||""; gApi.voice=settings.voice||"en-US-Neural2-F"; },[settings.googleKey, settings.voice]);
-
-  // 설정 로컬 저장
   useEffect(()=>{ saveLocal(booksRef.current, settings); },[settings]);
 
-  // Firebase 초기화 (config 변경 시)
-  useEffect(()=>{
-    if(!settings.firebaseConfig || !window.firebase){ return; }
-    let cfg; try{ cfg = parseFirebaseConfig(settings.firebaseConfig); }catch(e){ setSync("오류"); return; }
+  const cloudReady = !!(settings.driveUrl && settings.spaceId);
+
+  async function reload(){
+    const st=settingsRef.current;
+    if(!(st.driveUrl && st.spaceId)) return;
+    setSync("loading");
     try{
-      const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
-      const auth = firebase.auth(); const db = firebase.firestore();
-      fbRef.current = { app, auth, db };
-      setSync("연결중");
-      const off = auth.onAuthStateChanged(u=>{ setUser(u||null); });
-      return ()=>{ off && off(); };
-    }catch(e){ setSync("오류"); }
-  },[settings.firebaseConfig]);
+      const remote = await driveLoad(st.driveUrl, st.spaceId);
+      if(remote.length===0 && booksRef.current.length>0){
+        lastSyncedRef.current = JSON.stringify(booksRef.current);
+        loadedRef.current = true;
+        await driveSave(st.driveUrl, st.spaceId, booksRef.current);
+        setSync("saved"); return;
+      }
+      lastSyncedRef.current = JSON.stringify(remote);
+      loadedRef.current = true;
+      setBooks(remote);
+      setSync("saved");
+    }catch(e){ setSync("error"); }
+  }
 
-  // 로그인 시 Firestore 구독
+  // 드라이브 주소/공간이 생기거나 바뀌면 자동 불러오기
   useEffect(()=>{
-    if(unsubRef.current){ unsubRef.current(); unsubRef.current=null; }
-    if(!user || !fbRef.current){ if(!user) setSync(settings.firebaseConfig?"연결중":"local"); return; }
-    const ref = fbRef.current.db.collection("users").doc(user.uid);
-    setSync("cloud");
-    unsubRef.current = ref.onSnapshot(snap=>{
-      if(!snap.exists){ ref.set({ books:booksRef.current, updatedAt:Date.now() }).catch(()=>{}); return; }
-      const remote = snap.data().books||[];
-      const js = JSON.stringify(remote);
-      if(js!==lastSyncedRef.current){ lastSyncedRef.current=js; setBooks(remote); }
-    }, ()=> setSync("오류"));
-    return ()=>{ if(unsubRef.current){ unsubRef.current(); unsubRef.current=null; } };
-  },[user]);
+    loadedRef.current=false;
+    if(cloudReady) reload(); else setSync("local");
+  }, [settings.driveUrl, settings.spaceId]);
 
-  // books 변경 → 저장 (클라우드 or 로컬)
+  // books 변경 → 로컬 저장 + 드라이브 자동 저장(디바운스)
   useEffect(()=>{
-    const js=JSON.stringify(books);
     saveLocal(books, settingsRef.current);
+    if(!cloudReady) return;
+    const js = JSON.stringify(books);
     if(js===lastSyncedRef.current) return;
-    lastSyncedRef.current=js;
-    if(user && fbRef.current){ fbRef.current.db.collection("users").doc(user.uid).set({ books, updatedAt:Date.now() }).catch(()=>{}); }
-  },[books, user]);
+    if(!loadedRef.current) return; // 첫 불러오기 전엔 저장 안 함(덮어쓰기 방지)
+    lastSyncedRef.current = js;
+    setSync("saving");
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async ()=>{
+      try{ await driveSave(settings.driveUrl, settings.spaceId, books); setSync("saved"); }
+      catch(e){ setSync("error"); }
+    }, 800);
+  },[books]);
 
   const update=fn=>setBooks(prev=>{ const n=structuredClone(prev); fn(n); return n; });
   function createBook(title){ update(n=> n.unshift({id:uid(),title,createdAt:Date.now(),entries:[]})); }
@@ -807,15 +848,9 @@ function App(){
   function addEntry(entry){ update(n=>{ const b=n.find(x=>x.id===currentBookId); if(b) b.entries.push(entry); }); setScreen("book"); }
   function deleteEntry(eid){ update(n=>{ const b=n.find(x=>x.id===currentBookId); if(b) b.entries=b.entries.filter(e=>e.id!==eid); }); }
 
-  async function signIn(){
-    if(!fbRef.current){ setShowSettings(true); return; }
-    try{ const p=new firebase.auth.GoogleAuthProvider(); await fbRef.current.auth.signInWithPopup(p); }
-    catch(e){ alert("로그인 실패: "+(e.message||e)); }
-  }
-  async function signOut(){ try{ await fbRef.current.auth.signOut(); }catch(e){} }
-
   const currentBook=books.find(b=>b.id===currentBookId);
-  const cloudReady = !!settings.firebaseConfig;
+  const syncLabel = {local:"이 기기 저장", loading:"불러오는 중…", saving:"저장 중…", saved:"☁ 저장됨", error:"⚠ 연결 확인"}[sync];
+  const syncGreen = sync==="saved";
 
   return (
     <div className="min-h-screen">
@@ -826,13 +861,8 @@ function App(){
             <span className="text-[11px] text-[var(--ink2)] ml-2 hidden sm:inline">English Reading Studio</span>
           </button>
           <div className="flex items-center gap-2 text-sm">
-            <span className="text-[11px] px-2 py-1 rounded-full" style={{background: sync==="cloud"?"#e8f1ea":"#efe7d6", color: sync==="cloud"?"#3f7d50":"#5c544a"}}>
-              {sync==="cloud"?"☁ 동기화 중":sync==="연결중"?"연결 중…":sync==="오류"?"⚠ 설정 확인":"이 기기 저장"}
-            </span>
-            {cloudReady ? (
-              user ? <button className="btn text-xs underline" onClick={signOut} title={user.email}>로그아웃</button>
-                   : <Btn kind="soft" onClick={signIn}>Google 로그인</Btn>
-            ) : null}
+            <span className="text-[11px] px-2 py-1 rounded-full" style={{background: syncGreen?"#e8f1ea":"#efe7d6", color: syncGreen?"#3f7d50":"#5c544a"}}>{syncLabel}</span>
+            {cloudReady && <button className="btn text-xs underline" onClick={reload} title="다른 기기에서 저장한 내용 가져오기">↻ 불러오기</button>}
             <button className="btn px-2 py-1 rounded hover:bg-[var(--paper2)]" onClick={()=>setShowSettings(true)}>⚙️</button>
           </div>
         </div>
@@ -841,7 +871,7 @@ function App(){
       <main className="max-w-3xl mx-auto px-4 py-6">
         {(!settings.geminiKey || !cloudReady) && screen==="home" && (
           <div className="card rounded-lg p-3 mb-5 text-xs text-[var(--ink2)] flex items-center justify-between gap-2">
-            <span>💡 ⚙️ 설정에서 ① Gemini 키(사진 분석·무료) ③ Firebase 설정(기기 간 동기화)을 넣으세요. 발음·받아쓰기는 그냥 무료로 작동합니다.</span>
+            <span>💡 ⚙️ 설정에서 ① Gemini 키(사진 분석·무료) ③ 드라이브 저장(기기 간 저장)을 넣으세요. 발음·받아쓰기는 그냥 무료로 작동합니다.</span>
             <Btn kind="soft" onClick={()=>setShowSettings(true)}>설정</Btn>
           </div>
         )}
@@ -854,18 +884,10 @@ function App(){
       {showSettings && <Settings settings={settings} onClose={()=>setShowSettings(false)} onSave={s=>{ setSettings(s); setShowSettings(false); }} />}
 
       <footer className="max-w-3xl mx-auto px-4 py-8 text-center text-[11px] text-[var(--ink2)]">
-        원서 데이터는 로그인 시 구글 클라우드(Firestore)에 실시간 저장됩니다 · 키는 각 기기에만 보관됩니다
+        원서 데이터는 구글 드라이브에 자동 저장됩니다 · 키는 각 기기에만 보관됩니다
       </footer>
     </div>
   );
-}
-
-/* Firebase config 붙여넣기 파싱 (JSON 또는 JS 객체 모두 허용) */
-function parseFirebaseConfig(s){
-  s=s.trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1);
-  try{ return JSON.parse(s); }catch(e){}
-  let t=s.replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g,'$1"$2":').replace(/'/g,'"').replace(/,(\s*})/g,'$1');
-  return JSON.parse(t);
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
