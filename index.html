@@ -222,19 +222,26 @@ const ANALYSIS_SCHEMA = {
   properties:{
     rawText: STR,
     incompleteEnding: { type:"boolean" },
-    words: { type:"array", items:{ type:"object", properties:{
-      word:STR, display:STR, pos:STR,
-      meanings:{ type:"array", items:STR },
-      examples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR, type:STR } } }
-    } } },
-    sentences: { type:"array", items:{ type:"object", properties:{ en:STR, ko:STR } } },
-    phrases: { type:"array", items:{ type:"object", properties:{
-      phrase:STR, meaning:STR, explanation:STR,
-      nativeExamples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR } } }
-    } } }
-  }
+    words: { type:"array", items:{ type:"object",
+      properties:{
+        word:STR, display:STR, pos:STR,
+        meanings:{ type:"array", items:STR, minItems:1 },
+        examples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR, type:STR }, required:["en","ko"] } }
+      },
+      required:["word","pos","meanings"]
+    } },
+    sentences: { type:"array", items:{ type:"object", properties:{ en:STR, ko:STR }, required:["en","ko"] } },
+    phrases: { type:"array", items:{ type:"object",
+      properties:{
+        phrase:STR, meaning:STR, explanation:STR,
+        nativeExamples:{ type:"array", items:{ type:"object", properties:{ en:STR, ko:STR }, required:["en","ko"] } }
+      },
+      required:["phrase","meaning"]
+    } }
+  },
+  required:["rawText","words","sentences"]
 };
-const CORRECTION_SCHEMA = { type:"object", properties:{ ok:{ type:"boolean" }, corrected:STR, feedback:STR } };
+const CORRECTION_SCHEMA = { type:"object", properties:{ ok:{ type:"boolean" }, corrected:STR, feedback:STR }, required:["corrected","feedback"] };
 function parseJSON(text){
   let s=text.replace(/```json/gi,"").replace(/```/g,"").trim();
   const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a>=0&&b>a) s=s.slice(a,b+1);
@@ -301,7 +308,7 @@ JSON 스키마:
  "phrases":[ {"phrase":"구문 패턴(예: as 원급 as, used to)","meaning":"한국어 의미","explanation":"회화 활용 설명(한국어)","nativeExamples":[{"en":"원어민 표현","ko":"한국어"}]} ]
 }
 규칙:
-- words: A2에게 유용하거나 모를 만한 단어 위주(쉬운 기능어 제외). 자주 쓰는 뜻은 빠짐없이.
+- words: A2에게 유용하거나 모를 만한 단어 위주(쉬운 기능어 제외). **모든 단어는 meanings에 한국어 뜻을 최소 1개 이상 반드시 채우세요(절대 빈칸 금지).** 자주 쓰는 뜻은 빠짐없이. 단어가 5개 이상 나오도록 충분히 뽑으세요.
 - examples: 평서문/의문문 번갈아, 회화에서 바로 쓸 자연스러운 문장.
 - 모든 한국어 번역(examples의 ko, sentences의 ko 포함)은 **자연스러운 한국어로 의역**하세요. 영어 어순을 그대로 옮긴 어색한 직역·기계번역 말투를 절대 쓰지 마세요. 'you'를 무조건 '너/당신'으로 옮기지 말고, 한국어에서 자연스럽게(주어 생략 등) 표현하세요. 말투는 기본적으로 **부드러운 존댓말(해요체)**로 통일하되, 한국 사람이 실제로 말하듯 자연스럽게 다듬으세요.
 - sentences: 원문을 한 문장씩 끊어 영어→자연스러운 한국어.
